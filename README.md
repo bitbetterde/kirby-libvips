@@ -2,7 +2,7 @@
 
 A thumbnail ([Darkroom](https://github.com/getkirby/kirby/tree/main/src/Image/Darkroom)) driver for [Kirby CMS](https://getkirby.com) that generates thumbs with [libvips](https://www.libvips.org) — in-process via php-vips (FFI) or by shelling out to the `vipsthumbnail` CLI. Compared to GD or ImageMagick, libvips is faster and uses a fraction of the memory — especially noticeable with large source images or bulk thumb generation. Resize, crop (center, positional, panel focus points, smartcrop), `blur`, `grayscale` and `sharpen` are all supported.
 
-Requires **Kirby 4 or 5**, **PHP ≥ 8.1** and **libvips ≥ 8.15** installed on the server (`apt install libvips-tools`, `brew install vips`, …). Out of the box the plugin shells out to the `vipsthumbnail` and `vips` binaries — no PHP extension needed. If [php-vips](https://github.com/libvips/php-vips) is installed (`composer require jcupitt/vips`), the plugin automatically switches to in-process generation via FFI, which eliminates the ~60 ms process-spawn cost per thumb and makes small thumbs faster than GD.
+Requires **Kirby 4, 5 or 6**, **PHP ≥ 8.1** and **libvips ≥ 8.15** installed on the server (`apt install libvips-tools`, `brew install vips`, …). Out of the box the plugin shells out to the `vipsthumbnail` and `vips` binaries — no PHP extension needed. If [php-vips](https://github.com/libvips/php-vips) is installed (`composer require jcupitt/vips`), the plugin automatically switches to in-process generation via FFI, which eliminates the ~60 ms process-spawn cost per thumb and makes small thumbs faster than GD.
 
 ## Installation
 
@@ -140,6 +140,7 @@ The Kirby 4/5 rewrite of this plugin — the Darkroom driver, the FFI backend, t
 What that means for you:
 
 - **Nothing here is unverified LLM output.** Every code path was exercised against a real Kirby 5.5.2 installation with an 18-case test harness: output dimensions are checked against Kirby's GD driver, EXIF-rotated sources, panel focus points, format conversion (WebP/AVIF/PNG), metadata stripping, quality settings, and paths with spaces are all covered, for both backends.
+- **Kirby 6 compatibility is tested, not assumed.** The same pipeline was run against Kirby 6.0.0-rc.2 on PHP 8.3, 8.4 and 8.5 with both backends; the output is byte-identical to Kirby 5.6.4.
 - **The benchmark numbers are real measurements** from that setup (hardware and versions stated above), not estimates or vendor claims.
 - The plugin still ships human-auditable, dependency-light code: two PHP files you can read in ten minutes.
 
