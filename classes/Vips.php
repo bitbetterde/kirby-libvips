@@ -11,12 +11,18 @@ use Kirby\Image\Image;
 /**
  * libvips Darkroom driver
  *
- * Generates thumbnails by shelling out to the `vipsthumbnail`
- * (and, for focus crops, the `vips`) CLI that ships with libvips.
+ * Generates thumbnails in-process via php-vips (FFI) or by
+ * shelling out to the `vipsthumbnail` (and, for focus crops and
+ * effects, the `vips`) CLI that ships with libvips.
  * Requires libvips >= 8.15.
  */
 class Vips extends Darkroom
 {
+	/**
+	 * Output formats that keep all frames of an animated image
+	 */
+	protected static array $animatableTypes = ['gif', 'webp'];
+
 	/**
 	 * Returns the default thumb settings,
 	 * on top of Kirby's darkroom defaults
@@ -72,9 +78,19 @@ class Vips extends Darkroom
 			) : null;
 
 			$strategy = $focus !== null ? $this->smartcrop($crop, $options) : null;
+			$animated = $this->isAnimated($file, $options);
 
 			if ($this->backend($options) === 'ffi') {
-				$this->processFfi($file, $tmp, $focus, $strategy, $options);
+				if ($animated === true) {
+					$this->processFfiAnimated($file, $tmp, $focus, $strategy, $options);
+				} else {
+					$this->processFfi($file, $tmp, $focus, $strategy, $options);
+				}
+			} elseif (
+				$animated === true &&
+				$this->cliCanAnimate($focus, $options) === true
+			) {
+				$this->processCliAnimated($file, $tmp, $focus, $options, $temps);
 			} else {
 				$this->processCli($file, $tmp, $focus, $strategy, $options, $temps);
 			}
@@ -153,7 +169,99 @@ class Vips extends Darkroom
 		// effects chain on it and encode in the very last step
 		$temps[] = $work = $this->tmpRoot($file, 'v');
 		$this->exec($this->thumbnailCommand($input, $work, $options, $strategy));
+		$this->runChain($chain, $work, $tmp, $file, $options, $temps);
+	}
 
+	/**
+	 * Generates an animated thumb via the CLI binaries by
+	 * processing all frames as one tall strip
+	 *
+	 * @throws \Exception
+	 */
+	protected function processCliAnimated(
+		string $file,
+		string $tmp,
+		array|null $focus,
+		array $options,
+		array &$temps
+	): void {
+		$input = $file . '[n=-1]';
+		$chain = $this->effects($options);
+		$trim  = $focus !== null && $focus['width'] < $options['sourceWidth'];
+
+		if ($trim === false && $chain === []) {
+			$this->exec($this->thumbnailCommand($input, $tmp, $options));
+			return;
+		}
+
+		$temps[] = $work = $this->tmpRoot($file, 'v');
+
+		if ($trim === false) {
+			$this->exec($this->thumbnailCommand($input, $work, $options));
+		} else {
+			// shrink every frame to the thumb height, then trim the
+			// left/right edges of the whole strip in a single crop
+			$this->exec($this->thumbnailCommand($input, $work, ['width' => ''] + $options));
+
+			[$stripWidth, $stripHeight] = $this->vipsSize($work);
+
+			$scale = $options['height'] / $options['sourceHeight'];
+			$left  = (int)round($focus['x1'] * $scale);
+			$left  = max(0, min($stripWidth - $options['width'], $left));
+
+			array_unshift($chain, ['crop', [
+				(string)$left,
+				'0',
+				(string)min($options['width'], $stripWidth),
+				(string)$stripHeight,
+			]]);
+		}
+
+		$this->runChain($chain, $work, $tmp, $file, $options, $temps);
+	}
+
+	/**
+	 * Checks if the CLI backend can keep the animation for this job:
+	 * the vips CLI cannot crop each frame of a strip vertically, so
+	 * crops that trim the top/bottom only get the first frame
+	 */
+	protected function cliCanAnimate(array|null $focus, array $options): bool
+	{
+		return $focus === null || $focus['height'] >= $options['sourceHeight'];
+	}
+
+	/**
+	 * Reads width and height from the header of
+	 * an uncompressed vips intermediate (.v) file
+	 *
+	 * @throws \Exception
+	 */
+	protected function vipsSize(string $file): array
+	{
+		$header = (string)file_get_contents($file, false, null, 0, 12);
+		$format = match (substr($header, 0, 4)) {
+			"\xb6\xa6\xf2\x08" => 'V2',
+			"\x08\xf2\xa6\xb6" => 'N2',
+			default            => throw new Exception('Invalid vips intermediate file: ' . $file)
+		};
+
+		return array_values(unpack($format, $header, 4));
+	}
+
+	/**
+	 * Runs a chain of vips operations on the intermediate
+	 * file and encodes the result in the very last step
+	 *
+	 * @throws \Exception
+	 */
+	protected function runChain(
+		array $chain,
+		string $work,
+		string $tmp,
+		string $file,
+		array $options,
+		array &$temps
+	): void {
 		$lastIndex = array_key_last($chain);
 
 		foreach ($chain as $index => [$op, $args]) {
@@ -190,7 +298,9 @@ class Vips extends Darkroom
 		if ($focus !== null && $strategy === null) {
 			// exact crop rectangle: rotate upright, crop in display
 			// space, then shrink the cropped region
-			$image = \Jcupitt\Vips\Image::newFromFile($file);
+			// the same thumb path can be generated again later in the
+			// same PHP worker; never reuse a cached decode of the old file
+			$image = \Jcupitt\Vips\Image::newFromFile($file, ['revalidate' => true]);
 
 			if ($options['autoOrient'] === true) {
 				$image = $image->autorot();
@@ -211,7 +321,89 @@ class Vips extends Darkroom
 			$image = \Jcupitt\Vips\Image::thumbnail($file, $options['width'], $params);
 		}
 
-		// effects
+		$image = $this->ffiEffects($image, $options);
+		$image->writeToFile($tmp, $this->ffiSaveParams(F::extension($tmp), $options));
+	}
+
+	/**
+	 * Generates an animated thumb in-process via php-vips (FFI);
+	 * every frame runs through the same crop, shrink and effects
+	 */
+	protected function processFfiAnimated(
+		string $file,
+		string $tmp,
+		array|null $focus,
+		string|null $strategy,
+		array $options
+	): void {
+		// all frames stacked on top of each other
+		$strip  = \Jcupitt\Vips\Image::newFromFile($file, ['n' => -1, 'revalidate' => true]);
+		$height = $strip->getType('page-height') !== 0 ? $strip->get('page-height') : $strip->height;
+		$pages  = max(1, intdiv($strip->height, $height));
+		$params = ['height' => $options['height'], 'size' => 'force'];
+
+		if (is_string($options['profile']) === true) {
+			$params['output-profile'] = $options['profile'];
+		}
+
+		// content-aware crops shrink the frame until it just
+		// covers the thumb and then cut the same window out of it
+		$smart  = $strategy === 'attention' || $strategy === 'entropy';
+		$scale  = max(
+			$options['width'] / $options['sourceWidth'],
+			$options['height'] / $options['sourceHeight']
+		);
+		$cover  = [
+			'height' => max($options['height'], (int)round($options['sourceHeight'] * $scale)),
+			'size'   => 'force'
+		] + $params;
+		$window = null;
+		$frames = [];
+
+		for ($page = 0; $page < $pages; $page++) {
+			$frame = $strip->crop(0, $page * $height, $strip->width, $height);
+
+			if ($focus !== null && $smart === true) {
+				$frame = $frame->thumbnail_image(
+					max($options['width'], (int)round($options['sourceWidth'] * $scale)),
+					$cover
+				);
+
+				// find the most interesting region in the first
+				// frame and reuse it so the animation stays steady
+				if ($window === null) {
+					$found  = $frame->smartcrop(
+						$options['width'],
+						$options['height'],
+						['interesting' => $strategy]
+					);
+					$window = [-$found->xoffset, -$found->yoffset];
+				}
+
+				$frame = $frame->crop($window[0], $window[1], $options['width'], $options['height']);
+			} else {
+				if ($focus !== null) {
+					$frame = $frame->crop($focus['x1'], $focus['y1'], $focus['width'], $focus['height']);
+				}
+
+				$frame = $frame->thumbnail_image($options['width'], $params);
+			}
+
+			$frames[] = $this->ffiEffects($frame, $options);
+		}
+
+		$image = \Jcupitt\Vips\Image::arrayjoin($frames, ['across' => 1])->copy();
+		$image->set('page-height', $frames[0]->height);
+		$image->writeToFile($tmp, $this->ffiSaveParams(F::extension($tmp), $options));
+	}
+
+	/**
+	 * Applies the grayscale/blur/sharpen effects in-process
+	 */
+	protected function ffiEffects(
+		\Jcupitt\Vips\Image $image,
+		array $options
+	): \Jcupitt\Vips\Image {
 		if ($options['grayscale'] === true) {
 			$image = $image->colourspace('b-w');
 		}
@@ -225,7 +417,7 @@ class Vips extends Darkroom
 			$image  = $image->sharpen(['sigma' => $amount]);
 		}
 
-		$image->writeToFile($tmp, $this->ffiSaveParams(F::extension($tmp), $options));
+		return $image;
 	}
 
 	/**
@@ -356,6 +548,66 @@ class Vips extends Darkroom
 				'The vips command could not be executed: ' . $command .
 				' (' . trim(implode("\n", $output)) . ')'
 			);
+		}
+	}
+
+	/**
+	 * Checks if the output format can keep
+	 * all frames of an animated image
+	 */
+	protected function isAnimatable(string $file, array $options): bool
+	{
+		$format = $options['format'] ?? F::extension($file);
+		return in_array(strtolower($format), static::$animatableTypes, true);
+	}
+
+	/**
+	 * Checks if the job is an animation: an animated GIF/WebP
+	 * source that is written to a format which keeps the frames
+	 */
+	protected function isAnimated(string $file, array $options): bool
+	{
+		if ($this->isAnimatable($file, $options) === false) {
+			return false;
+		}
+
+		$handle = @fopen($file, 'rb');
+
+		if ($handle === false) {
+			return false;
+		}
+
+		try {
+			$header = (string)fread($handle, 21);
+
+			// animated WebPs set a flag in their `VP8X` header
+			if (substr($header, 0, 4) === 'RIFF' && substr($header, 8, 8) === 'WEBPVP8X') {
+				return (ord($header[20] ?? "\0") & 0x02) !== 0;
+			}
+
+			if (substr($header, 0, 3) !== 'GIF') {
+				return false;
+			}
+
+			// animated GIFs have more than one
+			// graphic control extension + image block
+			$frames = 0;
+			$buffer = $header;
+
+			while ($frames < 2 && feof($handle) === false) {
+				$buffer .= fread($handle, 1024 * 128);
+				$frames += preg_match_all(
+					'/\x00\x21\xF9\x04.{4}\x00[\x2C\x21]/s',
+					$buffer
+				);
+				// keep the tail in case a match spans two chunks
+				// (one byte less than a full match to avoid double counts)
+				$buffer = substr($buffer, -9);
+			}
+
+			return $frames > 1;
+		} finally {
+			fclose($handle);
 		}
 	}
 

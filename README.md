@@ -1,6 +1,6 @@
 # Kirby libvips thumbnail driver
 
-A thumbnail ([Darkroom](https://github.com/getkirby/kirby/tree/main/src/Image/Darkroom)) driver for [Kirby CMS](https://getkirby.com) that generates thumbs with [libvips](https://www.libvips.org) — in-process via php-vips (FFI) or by shelling out to the `vipsthumbnail` CLI. Compared to GD or ImageMagick, libvips is faster and uses a fraction of the memory — especially noticeable with large source images or bulk thumb generation. Resize, crop (center, positional, panel focus points, smartcrop), `blur`, `grayscale` and `sharpen` are all supported.
+A thumbnail ([Darkroom](https://github.com/getkirby/kirby/tree/main/src/Image/Darkroom)) driver for [Kirby CMS](https://getkirby.com) that generates thumbs with [libvips](https://www.libvips.org) — in-process via php-vips (FFI) or by shelling out to the `vipsthumbnail` CLI. Compared to GD or ImageMagick, libvips is faster and uses a fraction of the memory — especially noticeable with large source images or bulk thumb generation. Resize, crop (center, positional, panel focus points, smartcrop), `blur`, `grayscale` and `sharpen` are all supported, and animated GIFs/WebPs stay animated.
 
 Requires **Kirby 4, 5 or 6**, **PHP ≥ 8.1** and **libvips ≥ 8.15** installed on the server (`apt install libvips-tools`, `brew install vips`, …). Out of the box the plugin shells out to the `vipsthumbnail` and `vips` binaries — no PHP extension needed. If [php-vips](https://github.com/libvips/php-vips) is installed (`composer require jcupitt/vips`), the plugin automatically switches to in-process generation via FFI, which eliminates the ~60 ms process-spawn cost per thumb and makes small thumbs faster than GD.
 
@@ -83,13 +83,22 @@ They are parameter-matched to Kirby's ImageMagick driver (`gaussblur` with the s
 
 With the FFI backend the whole pipeline (shrink, crop, effects, encode) fuses in memory — no subprocesses, no intermediate files. With the CLI backend, effects run as additional `vips` operations on the already-shrunk intermediate, so each adds one process spawn but little actual work.
 
+## Animated images
+
+Animated GIFs and animated WebPs keep all their frames, frame delays and loop count when the thumb is written as GIF or WebP (including GIF → WebP via `thumbs.format` and vice versa) — the same behavior as Kirby's ImageMagick drivers since Kirby 5.6.2. Any other output format (JPEG, PNG, AVIF, …) gets the first frame.
+
+- **FFI backend:** full support. Resizing, every kind of crop and all effects are applied to each frame. With `smartcrop`, the crop region is picked on the first frame and reused for all frames, so the animation doesn't jitter.
+- **CLI backend:** resizing, effects and crops that trim the left/right edges keep the animation. Crops that trim the **top/bottom** edges fall back to the first frame, because the `vips` CLI cannot crop each frame of an animation vertically. `smartcrop` is ignored for animations (center crop). Use the FFI backend if you need those.
+
+Identical consecutive frames are merged by the GIF/WebP encoders (their delays are added up), so a thumb can have fewer frames than its source while playing exactly the same.
+
 ## Backends
 
 - **`auto`** (default): uses php-vips (FFI) when `jcupitt/vips` is installed and PHP's FFI extension is usable, otherwise the CLI binaries. Detection runs once per request and fails safe to CLI.
 - **`ffi`**: forces php-vips. ~5–15 ms per thumb warm; the one-time FFI/libvips initialization (~150 ms) is paid once per PHP-FPM worker, not per thumb. If FFI is blocked on your setup, set `ffi.enable = true` in php.ini.
 - **`cli`**: forces the `vipsthumbnail`/`vips` binaries. No PHP requirements at all, but each thumb pays a fixed process-spawn cost (~10–70 ms depending on platform).
 
-Both backends produce identically sized, visually identical output — `backend` only changes how fast you get it.
+Both backends produce identically sized, visually identical output — `backend` only changes how fast you get it. The one exception are [animated images](#animated-images) cropped at the top/bottom, which only the FFI backend can keep animated.
 
 ## Performance
 
