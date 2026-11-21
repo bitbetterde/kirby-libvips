@@ -132,9 +132,38 @@ class Vips extends Darkroom
 			} catch (\Throwable) {
 				$supported = false;
 			}
+
+			if ($supported === true) {
+				static::ensureLocaleEnv();
+			}
 		}
 
 		return $supported;
+	}
+
+	/**
+	 * Works around a crash of in-process libvips in PHP-FPM on macOS:
+	 * the first vips operation translates its description via gettext,
+	 * and Homebrew's libintl asks the macOS preferences (CoreFoundation)
+	 * for the user's language when no locale variable is set in the
+	 * environment. PHP-FPM clears the environment (`clear_env`) and its
+	 * workers are forked without exec, where CoreFoundation is unusable,
+	 * so the worker dies with SIGSEGV. Any locale variable makes gettext
+	 * skip that lookup; the PHP locale (setlocale) is not affected.
+	 */
+	protected static function ensureLocaleEnv(): void
+	{
+		if (PHP_OS_FAMILY !== 'Darwin') {
+			return;
+		}
+
+		foreach (['LC_ALL', 'LC_MESSAGES', 'LANG', 'LANGUAGE'] as $name) {
+			if (getenv($name) !== false && getenv($name) !== '') {
+				return;
+			}
+		}
+
+		putenv('LANG=C');
 	}
 
 	/**

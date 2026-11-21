@@ -95,7 +95,7 @@ Identical consecutive frames are merged by the GIF/WebP encoders (their delays a
 ## Backends
 
 - **`auto`** (default): uses php-vips (FFI) when `jcupitt/vips` is installed and PHP's FFI extension is usable, otherwise the CLI binaries. Detection runs once per request and fails safe to CLI.
-- **`ffi`**: forces php-vips. ~5–15 ms per thumb warm; the one-time FFI/libvips initialization (~150 ms) is paid once per PHP-FPM worker, not per thumb. If FFI is blocked on your setup, set `ffi.enable = true` in php.ini.
+- **`ffi`**: forces php-vips. ~5–15 ms per thumb warm; the one-time FFI/libvips initialization (~150 ms) is paid once per PHP-FPM worker, not per thumb. If FFI is blocked on your setup, set `ffi.enable = true` in php.ini (PHP-FPM allows FFI only with `true`, the default `preload` covers the CLI only). On macOS with Homebrew's libvips the plugin sets `LANG=C` in the process environment when no locale variable is present: PHP-FPM clears the environment, and without one gettext asks the macOS preferences via CoreFoundation, which crashes forked FPM workers.
 - **`cli`**: forces the `vipsthumbnail`/`vips` binaries. No PHP requirements at all, but each thumb pays a fixed process-spawn cost (~10–70 ms depending on platform).
 
 Both backends produce identically sized, visually identical output — `backend` only changes how fast you get it. The one exception are [animated images](#animated-images) cropped at the top/bottom, which only the FFI backend can keep animated.
