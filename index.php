@@ -13,4 +13,7 @@ if (class_exists(Vips::class) === false) {
 Darkroom::$types['vips'] ??= Vips::class;
 Darkroom::$types['vipsthumbnail'] ??= Vips::class;
 
-App::plugin('bitbetter/kirby-libvips', []);
+// the name has to match the ID in the Kirby plugin directory
+// (plugins.getkirby.com/bitbetterde/kirby-libvips), otherwise
+// the Panel's update check cannot find the latest version
+App::plugin('bitbetterde/kirby-libvips', []);
