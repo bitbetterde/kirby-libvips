@@ -321,7 +321,7 @@ class Vips extends Darkroom
 		$params = ['height' => $options['height']];
 
 		if (is_string($options['profile']) === true) {
-			$params['output-profile'] = $options['profile'];
+			$params['export-profile'] = $options['profile'];
 		}
 
 		if ($focus !== null && $strategy === null) {
@@ -372,7 +372,7 @@ class Vips extends Darkroom
 		$params = ['height' => $options['height'], 'size' => 'force'];
 
 		if (is_string($options['profile']) === true) {
-			$params['output-profile'] = $options['profile'];
+			$params['export-profile'] = $options['profile'];
 		}
 
 		// content-aware crops shrink the frame until it just
@@ -738,7 +738,9 @@ class Vips extends Darkroom
 		}
 
 		if (is_string($options['profile']) === true) {
-			$command .= ' --output-profile ' . escapeshellarg($options['profile']);
+			// `export-profile` is the name libvips < 8.17 knows; 8.17+ renamed it
+			// to `output-profile` but still accepts the old one (CLI and C API)
+			$command .= ' --export-profile ' . escapeshellarg($options['profile']);
 		}
 
 		$save = $this->saveOptions(F::extension($dst), $options);
